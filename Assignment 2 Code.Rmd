@@ -1,0 +1,273 @@
+---
+title: "Assignment 2"
+author: "Valentina Zhong (63260335)"
+date: "27/03/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loadpack}
+pacman::p_load(readxl,tidyverse,tseries,forecast,lubridate,lmtest,data.table,writexl,ggplot2,ggpubr,zoo,here,modelsummary)
+
+```
+
+```{r loaddata}
+data <- read_excel(here("Data","gtmh.xlsx"),skip = 2)
+data$Week <- ymd(data$Week)
+summary(data[,3],by = Group)
+datasummary_skim(data[,3],histogram=FALSE,title="Data Summary")
+
+
+#tapply(data$RSV, data$Group,
+#  function(x) format(summary(x), scientific = TRUE))
+tapply(data$RSV, data$Group, summary)
+data<- data[,2:3]
+ts.data <- ts(data$RSV,frequency = 52,start = c(2017,1),end = c(2020,52))
+plot(ts.data)
+```
+
+```{r}
+# Splitting the data set into training and forecasting
+# 1. Set cutoff date
+
+# data$obs_num <- seq.int(nrow(data)) 
+
+# set cutoff date for training and validation (test) periods
+cutoff_date <- "2020/03/14"
+
+## OPTIONAL - Dropping empty rows
+# data_set_all <- data_set_all %>% drop_na()
+
+# 2. Creating training and forecasting datasets
+## 2.1 Training dataset
+data_set_train <- data %>% filter(Week <= cutoff_date)
+
+## 2. Forecasting dataset
+data_set_fore <- data %>% filter(Week > cutoff_date)
+
+fore_period <- nrow(data_set_fore)
+
+```
+
+# Using Decomposition for Seasonal Data
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+data$RSV <- ts(data$RSV)
+plot(data$RSV)
+findfrequency(data$RSV)
+
+acf(data$RSV, main = "")
+title("Google Trend for Mental Health", line = 1)
+
+data$RSV <- ts(data$RSV, frequency = 52)
+
+# STL
+fst.stl <- stl(data$RSV, s.window="periodic")
+autoplot(fst.stl)
+
+# The acf is statistical significant at lag 1 and 2, we think there may exist autocorrelation
+# Meanwhile, there is periodic up and down in acf. We suspect that there is a seasonality in the dataset.
+#w For trend, decompose will help us to isolate the trend factor in the data, which indicate if there is an trend in our dataset.
+```
+
+
+
+### Training Dataset
+```{r echo=TRUE, message = FALSE, warning = FALSE, layout = "l-body-outset"}
+## 1. SES
+ses_train <- ets(data_set_train$RSV, model = "ZNN", 
+                     damped = NULL, na.action = "na.interp")
+# "na.interp" asks the function to interpolate when there are missing values
+
+## 2. Holt
+holt_train <- ets(data_set_train$RSV, model = "ZAN", 
+                      damped = FALSE, na.action = "na.interp")
+
+## 3. Damped Holt
+holt_d_train <- ets(data_set_train$RSV, model = "ZAN", 
+                        damped = TRUE, na.action = "na.interp")
+## 4. ARIMA
+arima_train <- 
+  auto.arima(data_set_train$RSV, max.p = 8, max.q =8, max.d = 2,
+             method = "ML", approximation = FALSE,
+             ic = "aic", stepwise = FALSE)
+
+arima_train
+## 5. Naive
+naive_train <- rwf(data_set_train$RSV)
+
+## 6. MA(52)
+ma_train <- ma(data_set_train$RSV, order = 52)
+
+## 7. NNAR
+nnar_train <- nnetar(na.interp(data_set_train$RSV))
+
+
+```
+
+
+### Forecasting Dataset
+```{r echo=TRUE, message = FALSE, warning = FALSE, layout = "l-body-outset"}
+## 1. SES
+ses_fore <- forecast(ses_train, h = fore_period)
+
+## 2. Holt
+holt_fore <- forecast(holt_train, h = fore_period)
+
+## 3. Damped Holt
+holt_d_fore <- forecast(holt_d_train, h = fore_period)
+
+## 4. ARIMA
+arima_fore <- forecast(arima_train, h = fore_period)
+
+## 5. Naive
+naive_fore <- rwf(data_set_train$RSV, h = fore_period)
+
+## 6. MA(52)
+ma_fore <- forecast(ma_train, h = fore_period)
+
+## 7. NNAR
+nnar_fore <- forecast(nnar_train, h = fore_period)
+
+```
+
+
+### Accuracy Matrices - Training Set
+```{r message = FALSE, warning = FALSE, layout = "l-body-outset"}
+## MAPE function
+mape_func <- function(forecast, actual){
+  div_series <- abs(forecast[["fitted"]] - actual) * 100 / actual
+  na_series <- sapply(div_series, function(x) replace(x, is.infinite(x), NA))
+  sum(na_series, na.rm = TRUE) / (length(na_series) - sum(is.na(na_series)))
+  }
+
+mape_func_ma <- function(forecast, actual){
+  div_series <- abs(forecast - actual) * 100 / actual
+  na_series <- sapply(div_series, function(x) replace(x, is.infinite(x), NA))
+  sum(na_series, na.rm = TRUE) / (length(na_series) - sum(is.na(na_series)))
+  }
+
+## Accuracy Matrices
+acc_matrix <- 
+  rbind(accuracy(naive_train$fitted, data_set_train$RSV), 
+        accuracy(ma_train, data_set_train$RSV),
+        accuracy(ses_train$fitted, data_set_train$RSV), 
+        accuracy(holt_train$fitted, data_set_train$RSV), 
+        accuracy(holt_d_train$fitted, data_set_train$RSV), 
+        accuracy(arima_train$fitted, data_set_train$RSV), 
+        accuracy(nnar_train$fitted, data_set_train$RSV))
+
+rownames(acc_matrix) <- 
+  c("naive", "ma52", "ses", "holt", "holt_d", "arima", "nnar")
+acc_matrix <- as.data.frame(acc_matrix)
+
+acc_matrix$MAPE[1] <- mape_func(naive_train, data_set_train$RSV)
+acc_matrix$MAPE[2] <- mape_func_ma(ma_train, data_set_train$RSV)
+acc_matrix$MAPE[3] <- mape_func(ses_train, data_set_train$RSV)
+acc_matrix$MAPE[4] <- mape_func(holt_train, data_set_train$RSV)
+acc_matrix$MAPE[5] <- mape_func(holt_d_train, data_set_train$RSV)
+acc_matrix$MAPE[6] <- mape_func(arima_train, data_set_train$RSV)
+acc_matrix$MAPE[7] <- mape_func(nnar_train, data_set_train$RSV)
+
+acc_matrix
+```
+
+
+### Accuracy Matrices _ Forecast Set
+```{r message = FALSE, warning = FALSE, layout = "l-body-outset"}
+## Accuracy Matrices
+acc_matrix_fore <- 
+  rbind(accuracy(naive_fore$fitted, data_set_fore$RSV), 
+        accuracy(ma_fore$fitted, data_set_fore$RSV), 
+        accuracy(ses_fore$fitted, data_set_fore$RSV), 
+        accuracy(holt_fore$fitted, data_set_fore$RSV), 
+        accuracy(holt_d_fore$fitted, data_set_fore$RSV), 
+        accuracy(arima_fore$fitted, data_set_fore$RSV), 
+        accuracy(nnar_fore$fitted, data_set_fore$RSV))
+
+rownames(acc_matrix_fore) <- 
+  c("naive", "ma52", "ses", "holt", "holt_d", "arima", "nnar")
+acc_matrix_fore <- as.data.frame(acc_matrix_fore)
+
+acc_matrix_fore$MAPE[1] <- mape_func(naive_fore, data_set_fore$RSV)
+acc_matrix_fore$MAPE[2] <- mape_func(ma_fore, data_set_fore$RSV)
+acc_matrix_fore$MAPE[3] <- mape_func(ses_fore, data_set_fore$RSV)
+acc_matrix_fore$MAPE[4] <- mape_func(holt_fore, data_set_fore$RSV)
+acc_matrix_fore$MAPE[5] <- mape_func(holt_d_fore, data_set_fore$RSV)
+acc_matrix_fore$MAPE[6] <- mape_func(arima_fore, data_set_fore$RSV)
+acc_matrix_fore$MAPE[7] <- mape_func(nnar_fore, data_set_fore$RSV)
+
+
+
+
+
+acc_matrix_fore
+
+
+```
+
+
+
+```{r message = FALSE, warning = FALSE, layout = "l-body-outset"}
+
+## First, Create tables with actual values, predicted values, and residuals
+
+### 1. Holts
+data_holt_long_r <- data_set_train %>% select(Week, RSV) %>%
+  rename(actual = RSV) %>%
+  mutate(predicted = holt_fore$fitted) %>%
+  mutate(errors = holt_fore$residuals) %>%
+  pivot_longer(cols = 2:4, names_to = "data_type", values_to = "RSV")
+
+## Plotting predicted vs actual values and resulting residuals
+## Note: Here just generating the plots independently 
+g_comp <- data_holt_long_r %>% 
+  filter(data_type %in% c("actual", "predicted")) %>%
+  ggplot(aes(x = Week, y = RSV, color = data_type)) +
+  geom_line() + 
+  labs(title = "Actual RSV vs Predicted RSV") +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank())
+
+g_resid <- data_holt_long_r %>% 
+  filter(data_type %in% "errors") %>%
+  ggplot(aes(x = Week, y = RSV)) +
+  geom_bar(stat = "identity") +
+  labs(y = "error")
+
+ggarrange(g_comp, g_resid, 
+          ncol = 1, align = "v", heights = c(3.5, 2),
+          legend = "bottom", common.legend = TRUE)
+
+### 2. ARIMA
+data_arima_long_r <- data_set_train %>% select(Week, RSV) %>%
+  rename(actual = RSV) %>%
+  mutate(predicted = arima_fore$fitted) %>%
+  mutate(errors = arima_fore$residuals) %>%
+  pivot_longer(cols = 2:4, names_to = "data_type", values_to = "RSV")
+
+## Plotting predicted vs actual values and resulting residuals
+## Note: Here just generating the plots independently 
+g_comp <- data_arima_long_r %>% 
+  filter(data_type %in% c("actual", "predicted")) %>%
+  ggplot(aes(x = Week, y = RSV, color = data_type)) +
+  geom_line() + 
+  labs(title = "Actual RSV vs Predicted RSV") +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank())
+
+g_resid <- data_arima_long_r %>% 
+  filter(data_type %in% "errors") %>%
+  ggplot(aes(x = Week, y = RSV)) +
+  geom_bar(stat = "identity") +
+  labs(y = "error")
+
+ggarrange(g_comp, g_resid, 
+          ncol = 1, align = "v", heights = c(3.5, 2),
+          legend = "bottom", common.legend = TRUE)
+
+
+```
+
